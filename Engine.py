@@ -3,12 +3,13 @@ import tensorflow.keras as keras
 import tensorflow.keras.layers as layers
 
 import numpy as np
+import random
 
 
 class TicTacToe:
     def __init__(self):
         #Reward Values
-        self.rewards = [0, 100, -100]
+        self.rewards = [0, 1, -1]
         self.reward = 0
 
         #Game Variables
@@ -27,6 +28,7 @@ class TicTacToe:
         self.board = [0]*9
         self.currentPlayer = 1
         self.remainingSquares = [0,1,2,3,4,5,6,7,8]
+        self.gameOver = False
     #end
 
     def step(self,action):
@@ -47,9 +49,9 @@ class TicTacToe:
         self.switchPlayers()
 
         #Reset game for next episode
-        if self.gameOver:
-            self.reset()
-        #end
+        # if self.gameOver:
+        #     self.reset()
+        # #end
     #end
 
     def getBoard(self):
@@ -127,7 +129,7 @@ class Model:
 
             dense1 = layers.Dense(50)(input)
 
-            output = layers.Dense(9, activation='sigmoid', name='output')(dense1)
+            output = layers.Dense(9, activation='softmax', name='output')(dense1)
 
             self.model = keras.Model(inputs=input, outputs=[output])
             self.model.compile(loss="huber", optimizer="adam")
@@ -149,11 +151,16 @@ class Model:
             #end
         #end
 
+        #View prdicted values
+        if viewPredictions:
+            print(preds)
+        #end
+
         return np.argmax(preds)
     #end
 
     def train(self,x,y):
-        self.model.fit(x=x,y=y,batch_size=batchSize,epochs=epochs,verbose=trainVerbose)
+        self.model.fit(x=x,y=y,batch_size=batchSize,epochs=5,verbose=trainVerbose)
     #end
 
     def save(self,path):
@@ -161,21 +168,48 @@ class Model:
     #end
 #end
 
-def getBatch(game,player,batchesToGenerate):
+def exampleGame(game,player1,player2):
+    #Play an example game bot v bot
+
+
+    player = True
+    game.reset()
+
+    while not game.gameOver:
+        if player:
+            move = player1.predictMove(game)
+            print("Player 1 plays " + str(move))
+            game.step(move)
+        else:
+            move = player2.predictMove(game)
+            print("Player 2 plays " + str(move))
+            game.step(move)
+        print(game.getBoard().reshape(3,3))
+        player = not player
+    #end
+#end
+
+def getBatch(game,player1,player2,batchesToGenerate):
     x = []
     y = []
 
     #Get games until got enough data for 1 batch
     while len(y) < batchesToGenerate*batchSize:
         #Play game till its over
-        while not game.gameOver:
-            move = player.predictMove(game)
-            game.step(move)
+        while not game.gameOver and len(game.remainingSquares) > 1:
+            game.step(random.choice(game.remainingSquares))
+            # game.step(random.choice(game.remainingSquares))
         #end
         tempX, tempY = game.getTrainingValues()
 
         x.append(tempX)
         y.append(tempY)
+
+        game.reset()
+
+        if len(y)%1000 == 0:
+            print("Collected " + str(len(y)) + "/" + str(batchesToGenerate*batchSize) + " batches")
+        #end
     #end
 
     return np.array(x).reshape(batchesToGenerate*batchSize,9), np.array(y).reshape(batchesToGenerate*batchSize,1)
@@ -185,8 +219,8 @@ def main():
     global player
     game = TicTacToe()
 
-    model = Model("model")
-    model.summary()
+    model1 = Model("model")
+    model1.summary()
 
     model2 = Model()
 
@@ -202,7 +236,7 @@ def main():
             if player:  #Players turn
                 move = int(input("Input digit between 0-8"))
             else:   #Models turn
-                move = model.predictMove(game)
+                move = model1.predictMove(game)
             #end
             player = not player
 
@@ -211,23 +245,28 @@ def main():
         #end
 
     else:   #Train model
+        for i in range(epochs):
+            print("Epoch: " + str(i))
+            x,y = getBatch(game,model1,model2,batchesToGenerate=batchesToGenerate)
+            print(y)
+            model1.train(x,y)
+        #end
+        model1.save("model")
 
-        x,y = getBatch(game,model,batchesToGenerate=batchesToGenerate)
-        model.train(x,y)
-
-        model.save("model")
+        exampleGame(game,model1,model2)
     #end
 #end
 
 if __name__ == "__main__":
     #Hyper params
-    batchSize = 128
-    batchesToGenerate = 100
-    epochs = 20
+    batchSize = 64
+    batchesToGenerate = 10
+    epochs = 50
     trainVerbose = 1
 
-    play = True    # Set to True to  play against the model
+    play = False    # Set to True to  play against the model
     player = True  # Set to True for real person to play first
+    viewPredictions = False
 
     main()
 #end
