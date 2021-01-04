@@ -20,7 +20,10 @@ class TicTacToe:
         self.winner = 0
 
         # Board tracking
-        self.state = [self.getBoard()]
+        self.prevState = []
+        self.state = []
+        self.action = []
+        self.over = []
     #end
 
     def reset(self):
@@ -34,11 +37,17 @@ class TicTacToe:
         self.gameOver = False
 
         # Board tracking
-        self.state = [self.getBoard()]
+        self.prevState = []
+        self.state = []
+        self.action = []
+        self.over = []
     #end
 
     def step(self,action):
         #Play a single round of the game
+
+        #Save previous state of board, before action is performed
+        self.prevState.append(self.getBoard())
 
         #Play a move
         if not self.gameOver:
@@ -61,6 +70,8 @@ class TicTacToe:
 
         #Save current game state
         self.state.append(self.getBoard())
+        self.action.append(action)
+        self.over.append(self.gameOver)
     #end
 
     def getBoard(self):
@@ -69,7 +80,7 @@ class TicTacToe:
 
     def getTrainingValues(self):
         #Returns game data for training, in correct format.
-        return np.array(self.state).reshape(-1, 9), self.reward
+        return np.array(self.state).reshape(-1, 9),np.array(self.prevState).reshape(-1, 9),self.action, self.reward, self.over
     #end
 
     #######################################
@@ -134,33 +145,45 @@ class Model:
         if path != "": #Load a pretrained model
             self.model = keras.models.load_model(path)
         else:   #Create model from scratch
-            input = keras.Input(shape=(9), name='input')
-
-            dense1 = layers.Dense(27)(input)
-            dense1 = layers.Dense(18)(dense1)
-
-            output = layers.Dense(9, activation='softmax', name='output')(dense1)
-
-            self.model = keras.Model(inputs=input, outputs=[output])
-            self.model.compile(loss="mean_absolute_error", optimizer="adam",metrics=['accuracy'])
+            self.model = self.createModel()
         #end
 
         # Hyper Params
         self.randomChoice = 0.2
         self.alpha = 0.5
+        self.gamma = 0.95
+        self.targetModel = self.createModel()
+    #end
+
+    def createModel(self):
+        input = keras.Input(shape=(9), name='input')
+
+        dense1 = layers.Dense(27)(input)
+        dense1 = layers.Dense(18)(dense1)
+
+        output = layers.Dense(9, name='output', activation="softmax")(dense1)
+
+        model = keras.Model(inputs=input, outputs=[output])
+        model.compile(loss="mse", optimizer="adam", metrics=['accuracy'])
+
+        return model
     #end
 
     def summary(self):
         self.model.summary()
     #end
 
-    def predictMove(self,game):
+    def predictMove(self,game,model=""):
         #Gets predictions of moves, then removes impossible moves from predictions
 
+        if model == "":
+            model = self.model
+        #end
+
         if type(game) is np.ndarray:
-            preds = tf.keras.backend.get_value(self.model(game.reshape(1,9)))[0]
+            preds = tf.keras.backend.get_value(model(game.reshape(1,9)))[0]
         else:
-            preds = tf.keras.backend.get_value(self.model(game.getBoard()))[0]
+            preds = tf.keras.backend.get_value(model(game.getBoard()))[0]
 
             for i in range(0, len(preds)):
                 if i not in game.remainingSquares:
@@ -174,6 +197,11 @@ class Model:
             print(preds)
         #end
 
+        #If playing a real game, dont randomly place
+        if play:
+            return np.argmax(preds)
+        #end
+
         if (random.randint(0,10)/10) > self.randomChoice:
             return np.argmax(preds)
         else:
@@ -181,30 +209,38 @@ class Model:
         #end
     #end
 
-    def train(self,x,y):
-        x_train = []
-        y_train = []
+    def train(self,games):
 
-        # Get target values for training
-        for game,R in zip(x,y):
-            prevState = game[0]
+        for i,game in enumerate(games):
+            print("Training game: " + str(i) + "/" + str(len(games)))
+            for i in range(len(game.get("over"))):
 
-            for state in game[1:]:
-                prevPrediction = self.predictMove(prevState)
-                currPrediction = self.predictMove(state)
+                target = self.targetModel.predict(np.array(game.get("prevStates")[i]).reshape(1,9))
 
-                x_train.append(prevState)
-                y_train.append(np.array(prevPrediction + self.alpha * (R[0] + currPrediction - prevPrediction)))
-
-                prevState = state
+                if game.get("over")[i]:
+                    target[0][game.get("actions")[i]] = game.get("rewards")
+                else:
+                    qFuture = self.predictMove(game.get("states")[i],self.targetModel)
+                    target[0][game.get("actions")[i]] = game.get("rewards") + qFuture * self.gamma
+                #end
+                self.model.fit(game.get("states")[i].reshape(1,9), target, epochs=1, verbose=0)
             #end
         #end
 
-        self.model.fit(x=np.array(x_train),y=np.array(y_train),batch_size=batchSize,epochs=1,verbose=trainVerbose)
+        self.target_train()
     #end
 
     def save(self,path):
+        print("Saving Model")
         self.model.save(path)
+    #end
+
+    def target_train(self):
+        weights = self.model.get_weights()
+        target_weights = self.targetModel.get_weights()
+        for i in range(len(target_weights)):
+            target_weights[i] = weights[i]
+        self.targetModel.set_weights(target_weights)
     #end
 #end
 
@@ -230,41 +266,44 @@ def exampleGame(game,player1,player2):
 #end
 
 def getBatch(game,player1,player2,batchesToGenerate):
-    x = []
-    y = []
+    games = []
 
     #Get games until got enough data for 1 batch
-    while len(y) < batchesToGenerate*batchSize:
+    while len(games) < batchesToGenerate*batchSize:
         #Play game till its over
         while not game.gameOver and len(game.remainingSquares) > 1:
             game.step(player1.predictMove(game))
             game.step(random.choice(game.remainingSquares))
         #end
-        currentX, currentY = game.getTrainingValues()
-        x.append(currentX)
-        y.append(currentY)
+        states, prevStates, actions, rewards, over = game.getTrainingValues()
+
+        games.append({
+            "states":states,
+            "prevStates":prevStates,
+            "actions":actions,
+            "rewards":rewards,
+            "over":over
+        })
 
         game.reset()
 
-        if len(y)%1000 == 0:
-            print("Collected " + str(len(y)) + "/" + str(batchesToGenerate*batchSize) + " batches")
-        #end
+        # if len(y)%1000 == 0:
+        #     print("Collected " + str(len(y)) + "/" + str(batchesToGenerate*batchSize) + " batches")
+        # #end
     #end
 
-    return x, np.array(y).reshape(batchesToGenerate*batchSize,1)
-#end
+    return games
 
 def main():
     global player
     game = TicTacToe()
 
-    model1 = Model()
+    model1 = Model("model")
     model1.summary()
 
     model2 = Model()
 
     if play:    #Play against the model
-
         #Loop until game is over
         while not game.gameOver:
 
@@ -285,10 +324,9 @@ def main():
 
     else:   #Train model
         for i in range(epochs):
-            x,y = getBatch(game,model1,model2,batchesToGenerate=batchesToGenerate)
+            games = getBatch(game,model1,model2,batchesToGenerate=batchesToGenerate)
 
-            model1.train(x,y)
-            print(y[0])
+            model1.train(games)
         #end
         model1.save("model")
 
@@ -299,11 +337,11 @@ def main():
 if __name__ == "__main__":
     #Hyper params
     batchSize = 64
-    batchesToGenerate = 5
-    epochs = 10
+    batchesToGenerate = 1
+    epochs = 5
     trainVerbose = 1
 
-    play = False    # Set to True to  play against the model
+    play = True    # Set to True to  play against the model
     player = True  # Set to True for real person to play first
     viewPredictions = False
 
